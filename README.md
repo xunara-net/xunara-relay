@@ -71,8 +71,9 @@ xunara-relay -hostname relay.example.com -derp-map-out - -derp-map-only
 ## 注册协议
 
 见 [docs/relay-protocol.md](docs/relay-protocol.md)。服务端实现位于
-[xunara-server](https://github.com/xunara-net/xunara-server) 的 Relay Platform
-里程碑（`/api/relay/v1/*`）。
+[xunara-server](https://github.com/xunara-net/xunara-server) 的
+`control/relay_api.go`：`POST /api/relay/v1/enroll` 与 `POST /api/relay/v1/heartbeat`，
+配额由套餐 `max_relays` 控制，决策记录见 ADR-0006。
 
 ## 构建与测试
 

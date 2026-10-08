@@ -1,7 +1,8 @@
 # Xunara Relay 注册协议（v1）
 
-> 状态：契约已冻结，服务端实现（`xunara-server` 的 Relay Platform 里程碑）
-> 正在推进。Relay 端见 `registration/`。
+> 状态：契约已冻结，Relay 端与服务端均已实现。服务端见 `xunara-server` 的
+> `control/relay_api.go`（`POST /api/relay/v1/enroll`、`/heartbeat`，配额走
+> `plan.MaxRelays`）与 ADR-0006；Relay 端见 `registration/`。
 
 ## 1. 身份模型
 
