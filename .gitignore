@@ -1,0 +1,7 @@
+# Build output
+/xunara-relay
+/bin/
+
+# Local relay state (DERP node key and identity)
+/veil-data/
+*.key
