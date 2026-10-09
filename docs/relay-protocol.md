@@ -27,6 +27,8 @@ Content-Type: application/json
   "name": "hk-1",
   "region_code": "hk",
   "region_name": "Hong Kong",
+  "region_id": 40001,
+  "cert_name": "sha256-raw:<64-hex-digits>",
   "hostname": "hk1.example.com",
   "node_key": "nodekey:...",
   "version": "0.1.0",
@@ -40,7 +42,7 @@ Content-Type: application/json
 200 OK
 {
   "relay_id": "relay-01H...",
-  "relay_token": "relay_...",
+  "relay_token": "xrelay-token-...",
   "control_url": "https://control.example.com",
   "name": "hk-1"
 }
@@ -54,6 +56,13 @@ Content-Type: application/json
 | 409 | `RELAY_ALREADY_ENROLLED` | 一次性令牌已被消费 |
 | 410 | `RELAY_ENROLLMENT_EXPIRED` | 令牌过期 |
 | 403 | `RELAY_LIMIT_REACHED` | 套餐中继数量已达上限 |
+| 403 | `RELAY_VISIBILITY_FORBIDDEN` | 接入请求与令牌授权的可见范围不同 |
+| 409 | `RELAY_REGION_CONFLICT` | 区域编号已被静态地图或租户节点使用 |
+
+`region_id` / `cert_name` 为可选兼容扩展。旧客户端省略时保存为区域 0 / 空 pin，
+不自动加入托管地图；非零区域需有效 DERP 公钥、合法主机和 1–65535 的未占用编号。
+`cert_name` 可省略以使用系统信任的域名证书；填写时只接受 SHA-256 原始证书 pin。
+可见范围省略时继承接入令牌，不能由服务身份覆盖管理员的授权。
 
 ## 3. 心跳与远程配置
 
@@ -91,3 +100,6 @@ Authorization: Bearer <relay-token>
   服务端不得依赖旧字段的缺失。
 - Relay 在控制面不可达时继续服务；心跳失败只记录日志并退避重试。
 - Relay 不代理业务 API：数据面只有 DERP/STUN。
+- 注册上报来自实际 DERP map / TLS 证书，不把展示区域名当作地区编号。
+  控制面仅将租户私有或组织节点加入该租户有效地图，不全局广播公共接入记录。
+  官方客户端 wire 类型未改变；决策见服务端 ADR-0019。

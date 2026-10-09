@@ -21,6 +21,8 @@ import (
 	"syscall"
 	"time"
 
+	"tailscale.com/tailcfg"
+
 	"github.com/xunara-net/xunara-relay/registration"
 	"github.com/xunara-net/xunara-relay/relay"
 )
@@ -83,6 +85,28 @@ func main() {
 		}
 	}
 
+	identityPath := *identityFile
+	if identityPath == "" {
+		identityPath = filepath.Join(*stateDir, "relay-identity.json")
+	}
+	identity, haveIdentity, err := registration.LoadIdentity(identityPath)
+	if err != nil {
+		logger.Error("reading relay identity", "err", err)
+		os.Exit(1)
+	}
+	managedURL := *controlURL
+	if haveIdentity {
+		managedURL = identity.ControlURL
+	}
+	*verifyURL, err = managedAdmissionURL(managedURL, *verifyURL)
+	if err != nil {
+		logger.Error("invalid managed relay admission configuration", "err", err)
+		os.Exit(1)
+	}
+	if managedURL != "" && *certMode == "" && !*insecure {
+		logger.Error("managed relay requires a TLS certificate mode; choose selfsigned, manual or letsencrypt")
+		os.Exit(1)
+	}
 	srv, err := relay.New(relay.Config{
 		ListenAddr:       *listen,
 		HostName:         *hostname,
@@ -112,16 +136,6 @@ func main() {
 	defer srv.Close()
 
 	started := time.Now()
-	identityPath := *identityFile
-	if identityPath == "" {
-		identityPath = filepath.Join(*stateDir, "relay-identity.json")
-	}
-
-	identity, haveIdentity, err := registration.LoadIdentity(identityPath)
-	if err != nil {
-		logger.Error("reading relay identity", "err", err)
-		os.Exit(1)
-	}
 	if !haveIdentity && *controlURL != "" {
 		token := ""
 		if *enrollEnv != "" {
@@ -152,10 +166,17 @@ func main() {
 			os.Exit(1)
 		}
 		client := &registration.Client{ControlURL: *controlURL, Token: token, UserAgent: "xunara-relay/" + version}
+		derpMap, mapErr := srv.DERPMap()
+		if mapErr != nil {
+			logger.Error("preparing managed DERP map", "err", mapErr)
+			os.Exit(1)
+		}
 		enrolled, err := client.Enroll(context.Background(), registration.EnrollRequest{
 			Name:       name,
 			RegionCode: *regionCode,
 			RegionName: *regionName,
+			RegionID:   *regionID,
+			CertName:   derpMap.Regions[tailcfg.DERPRegionID(*regionID)].Nodes[0].CertName,
 			HostName:   *hostname,
 			NodeKey:    srv.PublicKey().String(),
 			Version:    version,
@@ -218,6 +239,21 @@ func main() {
 		logger.Error("veil error", "err", err)
 		os.Exit(1)
 	}
+}
+
+func managedAdmissionURL(controlURL, explicit string) (string, error) {
+	if controlURL == "" {
+		return explicit, nil
+	}
+	base, err := registration.ControlBaseURL(controlURL)
+	if err != nil {
+		return "", err
+	}
+	if explicit != "" {
+		return explicit, nil
+	}
+	// 私有中继重启后仍使用持久服务身份对应的租户准入，不退回开放代理。
+	return base + "/derp/admit", nil
 }
 
 // relayConfigDERPPort derives the numeric DERP port from the listen address.

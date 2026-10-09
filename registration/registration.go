@@ -17,8 +17,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -42,6 +44,8 @@ type EnrollRequest struct {
 	// RegionCode and RegionName describe the DERP region this relay serves.
 	RegionCode string `json:"region_code"`
 	RegionName string `json:"region_name"`
+	RegionID   int    `json:"region_id,omitempty"`
+	CertName   string `json:"cert_name,omitempty"`
 	// HostName is the publicly reachable name clients will dial.
 	HostName string `json:"hostname"`
 	// NodeKey is the relay's DERP node public key ("nodekey:...").
@@ -83,7 +87,22 @@ func LoadIdentity(path string) (Identity, bool, error) {
 	if err := json.Unmarshal(raw, &id); err != nil {
 		return Identity{}, false, fmt.Errorf("parsing relay identity %s: %w", path, err)
 	}
-	return id, id.Valid(), nil
+	if !id.Valid() {
+		return Identity{}, false, errors.New("stored relay identity is incomplete; refusing to start as an unmanaged relay")
+	}
+	if _, err := ControlBaseURL(id.ControlURL); err != nil {
+		return Identity{}, false, err
+	}
+	return id, true, nil
+}
+
+// 控制面地址只能是无凭据的根地址，防止 URL 错配将服务密钥写入日志或重定向目标。
+func ControlBaseURL(raw string) (string, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed == nil || parsed.Scheme != "https" && parsed.Scheme != "http" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.RawPath != "" || strings.Trim(parsed.Path, "/") != "" {
+		return "", errors.New("relay control URL must be an HTTP(S) root address without credentials, query or fragment")
+	}
+	return parsed.Scheme + "://" + parsed.Host, nil
 }
 
 // Save writes the identity with 0600 permissions, creating the parent
@@ -171,14 +190,15 @@ func (c *Client) httpClient() *http.Client {
 
 // do posts a JSON body and decodes the JSON answer into out.
 func (c *Client) do(ctx context.Context, path string, token string, body, out any) error {
-	if c.ControlURL == "" {
-		return errors.New("relay registration: ControlURL is required")
+	base, err := ControlBaseURL(c.ControlURL)
+	if err != nil {
+		return err
 	}
 	blob, err := json.Marshal(body)
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.ControlURL+path, bytes.NewReader(blob))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+path, bytes.NewReader(blob))
 	if err != nil {
 		return err
 	}
@@ -188,7 +208,9 @@ func (c *Client) do(ctx context.Context, path string, token string, body, out an
 		req.Header.Set("User-Agent", c.UserAgent)
 	}
 
-	resp, err := c.httpClient().Do(req)
+	client := *c.httpClient()
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}

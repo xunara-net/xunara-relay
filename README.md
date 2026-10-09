@@ -43,16 +43,32 @@ xunara-relay -listen :3340 -hostname relay.example.com \
 ### 托管中继（注册到控制面）
 
 ```bash
-export XUNARA_RELAY_TOKEN='enroll-...'
+read -r -s -p '一次性接入令牌: ' XUNARA_RELAY_TOKEN; printf '\n'
+export XUNARA_RELAY_TOKEN
 xunara-relay -listen :443 -hostname hk1.example.com \
+  -state-dir /var/lib/xunara-relay -region-id 40001 \
   -control-url https://control.example.com \
   -enroll-token-env XUNARA_RELAY_TOKEN \
   -relay-name hk-1 -relay-visibility private \
   -cert-mode letsencrypt -cert-dir /var/lib/xunara-relay
+unset XUNARA_RELAY_TOKEN
 ```
 
 首次启动消费一次性令牌并落盘长期身份；再次启动直接用心跳上线。
 身份存在时忽略 `-enroll-token-env`。
+
+以上命令在已安装二进制的主机上用 Bash 执行；不把令牌写入参数或 shell 历史。
+选择未占用的区域编号并开放 TCP 443 / UDP 3478。托管模式必须配置 TLS；按 IP 调试
+可用 `-cert-mode selfsigned`，注册会自动提交证书 SHA-256 pin，不关闭 TLS 验证。
+长期身份损坏或控制面 URL 非法会报错，不降级为开放的独立中继。
+
+未显式设置 `-verify-url` 时，托管模式自动使用持久租户地址下的 `/derp/admit`，重启
+仍校验准入。单独部署的公共中继应显式指定已配置的准入地址。控制面地址只接受根
+HTTP(S) URL，无查询、用户信息或片段；注册/心跳不会跟随重定向重放服务凭据。
+
+新版控制面将健康、最近心跳且启用的私有节点并入本租户标准 DERPMap；删除、维护、
+停用或过期后退出地图。旧记录缺少区域 / pin 时不猜测发布，需升级后重新接入。
+地图不是端口探测；自签证书轮换必须同步新 pin，不能只替换证书后仍用旧记录。
 
 ### 仅生成 DERP map（不服务）
 
