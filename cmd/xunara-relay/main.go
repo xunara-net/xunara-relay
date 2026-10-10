@@ -10,6 +10,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -214,25 +215,52 @@ func main() {
 	defer stop()
 
 	if haveIdentity {
+		srv.AwaitControlAuthorization()
+		manager, err := registration.NewManager(identityPath+".config", identity, srv.PublicKey().String(),
+			func(configuration registration.RemoteConfig) error {
+				return srv.ApplyRuntimeConfiguration(relay.RuntimeConfig{DesiredState: configuration.DesiredState, BandwidthLimit: configuration.BandwidthLimit, RegionName: configuration.RegionName})
+			}, func() registration.RuntimeState {
+				configuration := srv.RuntimeConfiguration()
+				return registration.RuntimeState{State: configuration.DesiredState, BandwidthLimit: configuration.BandwidthLimit}
+			})
+		if errors.Is(err, registration.ErrServiceRevoked) {
+			if applyErr := srv.ApplyRuntimeConfiguration(relay.RuntimeConfig{DesiredState: "revoked"}); applyErr != nil {
+				logger.Error("stopping revoked relay", "err", applyErr)
+				os.Exit(1)
+			}
+			logger.Warn("relay identity is revoked; DERP remains closed until a new identity is provisioned")
+		} else if err != nil {
+			logger.Error("loading relay runtime configuration", "err", err)
+			os.Exit(1)
+		}
 		client := &registration.Client{
 			ControlURL: identity.ControlURL,
 			Token:      identity.Token,
 			UserAgent:  "xunara-relay/" + version,
 		}
-		go client.RunHeartbeats(ctx, *heartbeat,
-			func() registration.Status {
-				return registration.Status{
-					Version:       version,
-					Healthy:       true,
-					UptimeSeconds: int64(time.Since(started).Seconds()),
-				}
-			},
-			func(cfg registration.RemoteConfig) {
-				logger.Info("relay configuration updated",
-					"config_version", cfg.ConfigVersion, "desired_state", cfg.DesiredState)
-			},
-			func(err error) { logger.Warn("relay heartbeat failed", "err", err) },
-		)
+		if !errors.Is(err, registration.ErrServiceRevoked) {
+			go client.RunHeartbeats(ctx, *heartbeat,
+				func() registration.Status {
+					statistics, err := srv.Statistics()
+					return registration.Status{
+						Version:          version,
+						Healthy:          err == nil && srv.Addr() != nil && srv.RuntimeConfiguration().DesiredState == "online",
+						UptimeSeconds:    int64(time.Since(started).Seconds()),
+						ConnectedClients: statistics.ConnectedClients, BytesIn: statistics.BytesIn, BytesOut: statistics.BytesOut,
+						Execution: manager.Receipt(),
+					}
+				},
+				manager.Apply,
+				func(err error) {
+					if registration.TerminalIdentityError(err) {
+						if revokeErr := manager.Revoke(); revokeErr != nil {
+							logger.Error("stopping revoked relay", "err", revokeErr)
+						}
+					}
+					logger.Warn("relay heartbeat failed", "err", err)
+				},
+			)
+		}
 	}
 
 	if err := srv.Serve(ctx); err != nil {

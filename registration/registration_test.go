@@ -162,7 +162,7 @@ func TestHeartbeatsApplyOnlyNewConfig(t *testing.T) {
 	errs := make(chan error, 4)
 	go client.RunHeartbeats(ctx, 10*time.Millisecond,
 		func() Status { return Status{Version: "0.1.0", Healthy: true} },
-		func(cfg RemoteConfig) { applied <- cfg },
+		func(cfg RemoteConfig) error { applied <- cfg; return nil },
 		func(err error) { errs <- err },
 	)
 

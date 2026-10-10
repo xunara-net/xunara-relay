@@ -13,6 +13,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"expvar"
 	"fmt"
 	"log/slog"
 	"net"
@@ -25,7 +26,6 @@ import (
 	"time"
 
 	"golang.org/x/crypto/acme/autocert"
-	"golang.org/x/time/rate"
 	"tailscale.com/atomicfile"
 	"tailscale.com/derp/derpserver"
 	"tailscale.com/net/stunserver"
@@ -131,8 +131,10 @@ type Server struct {
 	cfg Config
 	log *slog.Logger
 
-	key  key.NodePrivate
-	derp *derpserver.Server
+	key     key.NodePrivate
+	derp    *derpserver.Server
+	runtime *runtimeControl
+	metrics expvar.Var
 
 	// acme is the automatic certificate manager (CertModeLetsEncrypt) and
 	// nil otherwise. It serves certificates for cfg.HostName only.
@@ -185,8 +187,8 @@ func New(cfg Config) (*Server, error) {
 	if _, _, err := net.SplitHostPort(cfg.ListenAddr); err != nil {
 		return nil, fmt.Errorf("veil: invalid ListenAddr %q: %w", cfg.ListenAddr, err)
 	}
-	if cfg.BandwidthLimit < 0 {
-		return nil, errors.New("veil: BandwidthLimit must not be negative")
+	if cfg.BandwidthLimit < 0 || cfg.BandwidthLimit > 1<<53-1 {
+		return nil, errors.New("veil: BandwidthLimit must be a non-negative safe integer")
 	}
 	if cfg.BandwidthBurst < 0 {
 		return nil, errors.New("veil: BandwidthBurst must not be negative")
@@ -213,11 +215,13 @@ func New(cfg Config) (*Server, error) {
 	}
 
 	s := &Server{
-		cfg:  cfg,
-		log:  cfg.Logger,
-		key:  nodeKey,
-		derp: derpserver.New(nodeKey, cfg.logf()),
+		cfg:     cfg,
+		log:     cfg.Logger,
+		key:     nodeKey,
+		derp:    derpserver.New(nodeKey, cfg.logf()),
+		runtime: newRuntimeControl(cfg),
 	}
+	s.metrics = s.derp.ExpVar(false)
 	if certMode == CertModeLetsEncrypt {
 		host, err := cfg.acmeHost()
 		if err != nil {
@@ -431,7 +435,14 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	derpHandler := derpserver.AddWebSocketSupport(s.derp, derpserver.Handler(s.derp))
-	mux.Handle("/derp", derpHandler)
+	mux.HandleFunc("/derp", func(writer http.ResponseWriter, request *http.Request) {
+		if s.RuntimeConfiguration().DesiredState != "online" {
+			writer.Header().Set("Retry-After", "60")
+			http.Error(writer, "relay is not accepting new clients", http.StatusServiceUnavailable)
+			return
+		}
+		derpHandler.ServeHTTP(writer, request)
+	})
 	// Clients without UDP access probe these as a replacement for STUN.
 	mux.HandleFunc("/derp/probe", derpserver.ProbeHandler)
 	mux.HandleFunc("/derp/latency-check", derpserver.ProbeHandler)
@@ -460,11 +471,9 @@ func (s *Server) Serve(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("veil: listening on %s: %w", s.cfg.ListenAddr, err)
 	}
-	if burst := s.cfg.bandwidthBurst(); burst > 0 {
-		ln = newLimitedListener(ln, rate.Limit(s.cfg.BandwidthLimit), burst)
-		s.log.Info("veil per-connection bandwidth limit enabled",
-			"bytes_per_sec", s.cfg.BandwidthLimit, "burst", burst)
-	}
+	ln = &limitedListener{Listener: ln, runtime: s.runtime}
+	defer s.derp.Close()
+	defer s.closeConnections()
 	s.mu.Lock()
 	s.listener = ln
 	s.addr = ln.Addr()
@@ -521,7 +530,6 @@ func (s *Server) Serve(ctx context.Context) error {
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			return err
 		}
-		s.derp.Close()
 		return nil
 	}
 }
@@ -595,7 +603,7 @@ func (s *Server) DERPMap() (*tailcfg.DERPMap, error) {
 			regionID: {
 				RegionID:   regionID,
 				RegionCode: s.cfg.RegionCode,
-				RegionName: s.cfg.RegionName,
+				RegionName: s.RuntimeConfiguration().RegionName,
 				Nodes:      []*tailcfg.DERPNode{node},
 			},
 		},
@@ -606,6 +614,7 @@ func (s *Server) DERPMap() (*tailcfg.DERPMap, error) {
 // Close releases server resources. It is a no-op for a server that never
 // served.
 func (s *Server) Close() error {
+	s.closeConnections()
 	s.mu.Lock()
 	ln := s.listener
 	s.mu.Unlock()

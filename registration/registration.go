@@ -2,11 +2,7 @@
 // exchanges a one-time enrollment token for a long-lived identity, then keeps
 // the control plane informed with heartbeats and picks up remote configuration.
 //
-// The relay data plane never depends on the control plane. An already-enrolled
-// relay keeps serving DERP/STUN while the control plane is unreachable; a
-// managed relay with no identity refuses to guess one and exits instead
-// (fail closed), because a relay that joins the wrong tailnet is worse than a
-// relay that is down.
+// 运行中控制面故障不影响既有连接；新进程必须确认授权，不能凭缓存开放数据面。
 package registration
 
 import (
@@ -132,12 +128,13 @@ func (i Identity) Save(path string) error {
 
 // Status is the relay's self-report on each heartbeat.
 type Status struct {
-	Version          string `json:"version"`
-	Healthy          bool   `json:"healthy"`
-	UptimeSeconds    int64  `json:"uptime_seconds"`
-	ConnectedClients int    `json:"connected_clients"`
-	BytesIn          int64  `json:"bytes_in"`
-	BytesOut         int64  `json:"bytes_out"`
+	Version          string     `json:"version"`
+	Healthy          bool       `json:"healthy"`
+	UptimeSeconds    int64      `json:"uptime_seconds"`
+	ConnectedClients int        `json:"connected_clients"`
+	BytesIn          int64      `json:"bytes_in"`
+	BytesOut         int64      `json:"bytes_out"`
+	Execution        *Execution `json:"execution,omitempty"`
 }
 
 // RemoteConfig is the control plane's answer to a heartbeat: the desired
@@ -147,11 +144,12 @@ type RemoteConfig struct {
 	// DesiredState is "online", "maintenance", "disabled" or "revoked".
 	DesiredState string `json:"desired_state"`
 	// ConfigVersion changes whenever any field below changes.
-	ConfigVersion string `json:"config_version"`
+	ConfigVersion  string `json:"config_version"`
+	ConfigRevision uint64 `json:"config_revision,omitempty"`
 	// BandwidthLimit is a per-connection byte/second limit; zero leaves the
 	// relay's own configuration alone, -1 removes the limit.
 	BandwidthLimit int64 `json:"bandwidth_limit"`
-	// RegionName renames the region without a restart; empty keeps it.
+	// RegionName renames the region without a restart; empty restores the local name.
 	RegionName string `json:"region_name"`
 }
 
@@ -163,10 +161,13 @@ type Error struct {
 }
 
 func (e *Error) Error() string {
-	if e.Code != "" {
-		return fmt.Sprintf("control plane answered %d (%s): %s", e.StatusCode, e.Code, e.Message)
-	}
-	return fmt.Sprintf("control plane answered %d: %s", e.StatusCode, e.Message)
+	// 外部错误体可能回显 Authorization；自动日志只包含状态码。
+	return fmt.Sprintf("control plane answered HTTP %d", e.StatusCode)
+}
+
+func TerminalIdentityError(err error) bool {
+	var response *Error
+	return errors.As(err, &response) && (response.StatusCode == http.StatusUnauthorized && response.Code == "RELAY_TOKEN_INVALID" || response.StatusCode == http.StatusForbidden && response.Code == "RELAY_REVOKED")
 }
 
 // Client talks to the Xunara control plane.
@@ -275,7 +276,7 @@ func (c *Client) RunHeartbeats(
 	ctx context.Context,
 	interval time.Duration,
 	status func() Status,
-	apply func(RemoteConfig),
+	apply func(RemoteConfig) error,
 	onError func(error),
 ) {
 	if interval <= 0 {
@@ -283,7 +284,7 @@ func (c *Client) RunHeartbeats(
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	lastConfig := ""
+	var lastConfig *RemoteConfig
 	for {
 		cfg, err := c.Heartbeat(ctx, status())
 		if err != nil {
@@ -293,9 +294,17 @@ func (c *Client) RunHeartbeats(
 			if onError != nil {
 				onError(err)
 			}
-		} else if apply != nil && cfg.ConfigVersion != lastConfig {
-			apply(cfg)
-			lastConfig = cfg.ConfigVersion
+			if TerminalIdentityError(err) {
+				return
+			}
+		} else if apply != nil && (lastConfig == nil || cfg != *lastConfig) {
+			if err := apply(cfg); err != nil {
+				if onError != nil {
+					onError(err)
+				}
+			} else {
+				lastConfig = &cfg
+			}
 		}
 		select {
 		case <-ctx.Done():
