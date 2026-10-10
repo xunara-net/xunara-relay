@@ -30,6 +30,14 @@ heartbeat → 控制面下发期望状态/限速/名称（未来：灰度升级�
 
 ## 快速开始
 
+### 直接下载预编译程序
+
+在 [GitHub Releases](https://github.com/xunara-net/xunara-relay/releases) 选择发行版，
+直接下载服务器对应的 Linux、macOS 或 Windows / AMD64、ARM64（Linux 另有 ARMv7）
+文件，无需安装 Go。下载 `SHA256SUMS` 并校验后再运行；平台差异和验证边界见
+[预编译说明](docs/precompiled-release.md)。发布工作流只在源码测试和全部目标编译
+成功后上传二进制，不提供占位下载链接。
+
 ### 独立 DERP 中继
 
 ```bash

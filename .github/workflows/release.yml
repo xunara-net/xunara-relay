@@ -1,0 +1,41 @@
+name: Precompiled Relay Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Validate source
+        run: |
+          go build ./...
+          go vet ./...
+          go test ./... -count=1
+          go test -race ./... -count=1
+      - name: Cross compile all release targets
+        run: bash scripts/build-release.sh "$GITHUB_REF_NAME" "$RUNNER_TEMP/relay-release"
+      - name: Verify native binary and checksums
+        run: |
+          cd "$RUNNER_TEMP/relay-release"
+          sha256sum --check SHA256SUMS
+          ./xunara-relay_linux_amd64 -version | grep -Fx "xunara-relay $GITHUB_REF_NAME"
+      - name: Publish verified precompiled files
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then prerelease+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" "$RUNNER_TEMP"/relay-release/* --verify-tag \
+            --repo "$GITHUB_REPOSITORY" --title "Xunara Relay $GITHUB_REF_NAME" \
+            --notes-file docs/precompiled-release.md "${prerelease[@]}"
