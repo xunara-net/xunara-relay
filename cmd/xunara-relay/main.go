@@ -242,9 +242,11 @@ func main() {
 			go client.RunHeartbeats(ctx, *heartbeat,
 				func() registration.Status {
 					statistics, err := srv.Statistics()
+					// 地址对象存在不表示服务仍在监听；本地真实探测失败时不报告健康。
+					healthy := err == nil && srv.CheckHealth(ctx) == nil
 					return registration.Status{
 						Version:          version,
-						Healthy:          err == nil && srv.Addr() != nil && srv.RuntimeConfiguration().DesiredState == "online",
+						Healthy:          healthy,
 						UptimeSeconds:    int64(time.Since(started).Seconds()),
 						ConnectedClients: statistics.ConnectedClients, BytesIn: statistics.BytesIn, BytesOut: statistics.BytesOut,
 						Execution: manager.Receipt(),

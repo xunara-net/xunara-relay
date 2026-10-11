@@ -29,7 +29,9 @@ for target in linux/amd64 linux/arm64 linux/arm darwin/amd64 darwin/arm64 window
   CGO_ENABLED=0 GOOS="$platform" GOARCH="$architecture" GOARM=7 \
     go build -trimpath -buildvcs=true -ldflags "-s -w -X main.version=$version" -o "$output/$asset" ./cmd/xunara-relay
 done
+sed "s/^release_version=.*/release_version=\"$version\"/" scripts/install-private-relay.sh > "$output/install-private-relay.sh"
+chmod 0755 "$output/install-private-relay.sh"
 cd "$output"
-sha256sum xunara-relay_* > SHA256SUMS
+sha256sum xunara-relay_* install-private-relay.sh > SHA256SUMS
 printf 'Version: %s\nSource: %s\n' "$version" "$(git -C "$root" rev-parse HEAD)" > BUILD.txt
 printf 'Precompiled release files: %s\n' "$output"

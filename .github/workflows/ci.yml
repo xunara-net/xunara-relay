@@ -16,9 +16,15 @@ jobs:
           cache: true
       - name: Build
         run: go build ./...
+      - name: Installer validation
+        run: |
+          bash -n scripts/install-private-relay.sh
+          bash scripts/install-private-relay.sh --control-url https://control.example.com --hostname relay.example.com --dry-run
       - name: Vet
         run: go vet ./...
       - name: Test
         run: go test ./... -count=1
       - name: Race
         run: go test -race ./... -count=1
+      - name: Isolated installer
+        run: bash scripts/test-private-relay-installer.sh

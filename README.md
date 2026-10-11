@@ -18,6 +18,8 @@ heartbeat → 控制面下发期望状态/限速/名称（未来：灰度升级�
 - **DERP 协议**：官方 Tailscale 客户端可直接作为中继使用（与上游 derper
   相同的 `/derp` 升级处理器）。
 - **STUN**：端点发现（默认 UDP 3478）。
+- **私有中继安装**：Linux systemd 参数化安装脚本，固定预编译版校验、隐藏令牌、独立服务与身份保留升级，见[安装手册](docs/private-relay-install.md)。
+- **真实本地健康**：心跳检查实际 TLS/探测服务；与控制面主动检测、客户端真实路径分开展示。
 - **准入控制**：`-verify-url` 指向控制面 `/derp/admit`，只中继本网络的
   节点密钥。
 - **TLS**：手工证书、Let's Encrypt（ACME TLS-ALPN-01）或自签名（发布
