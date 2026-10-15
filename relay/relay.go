@@ -66,6 +66,9 @@ type Config struct {
 	// STUN enables the STUN listener, required by clients for endpoint
 	// discovery. New deployments should leave it enabled.
 	STUN bool
+	// STUNUnadvertised keeps the UDP listener and local checks enabled without
+	// advertising an endpoint before its public NAT/firewall mapping is verified.
+	STUNUnadvertised bool
 	// STUNPort is the UDP port STUN listens on. Zero uses DefaultSTUNPort;
 	// a negative value omits STUN from generated maps.
 	STUNPort int
@@ -149,6 +152,8 @@ type Server struct {
 	mu       sync.Mutex
 	listener net.Listener
 	addr     net.Addr
+	stunAddr net.Addr
+	cancel   context.CancelFunc
 }
 
 // New builds a Veil server from cfg. It loads (or creates) the DERP node key
@@ -186,6 +191,9 @@ func New(cfg Config) (*Server, error) {
 	}
 	if _, _, err := net.SplitHostPort(cfg.ListenAddr); err != nil {
 		return nil, fmt.Errorf("veil: invalid ListenAddr %q: %w", cfg.ListenAddr, err)
+	}
+	if cfg.STUN && (cfg.STUNPort < 0 || cfg.STUNPort > 65535) {
+		return nil, errors.New("veil: enabled STUN port must be between 0 and 65535")
 	}
 	if cfg.BandwidthLimit < 0 || cfg.BandwidthLimit > 1<<53-1 {
 		return nil, errors.New("veil: BandwidthLimit must be a non-negative safe integer")
@@ -467,20 +475,47 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 // Serve binds the DERP, STUN and HTTP listeners and serves until ctx is
 // cancelled.
 func (s *Server) Serve(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	ln, err := net.Listen("tcp", s.cfg.ListenAddr)
 	if err != nil {
 		return fmt.Errorf("veil: listening on %s: %w", s.cfg.ListenAddr, err)
 	}
 	ln = &limitedListener{Listener: ln, runtime: s.runtime}
+	defer ln.Close()
 	defer s.derp.Close()
 	defer s.closeConnections()
+	var stunServer *stunserver.STUNServer
+	if s.cfg.STUN {
+		host, _, _ := net.SplitHostPort(s.cfg.ListenAddr)
+		stunServer = stunserver.New(ctx)
+		// UDP 必须先绑定成功再发布就绪，不能只开 TCP 却向客户端广播可用的 STUN。
+		if err := stunServer.Listen(net.JoinHostPort(host, strconv.Itoa(s.stunPort()))); err != nil {
+			return fmt.Errorf("veil: STUN listener failed: %w", err)
+		}
+	}
 	s.mu.Lock()
 	s.listener = ln
 	s.addr = ln.Addr()
+	s.cancel = cancel
+	if stunServer != nil {
+		s.stunAddr = stunServer.LocalAddr()
+	}
 	s.mu.Unlock()
 
-	if s.cfg.STUN {
-		go s.serveSTUN(ctx)
+	if stunServer != nil {
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			if err := stunServer.Serve(); err != nil && ctx.Err() == nil {
+				s.log.Error("veil STUN stopped", "err", err)
+				cancel()
+			}
+		}()
+		defer func() {
+			cancel()
+			<-done
+		}()
 	}
 
 	srv := &http.Server{
@@ -534,20 +569,6 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 }
 
-// serveSTUN runs the STUN listener until ctx is cancelled. STUN failures are
-// logged but do not take the DERP service down.
-func (s *Server) serveSTUN(ctx context.Context) {
-	host, _, err := net.SplitHostPort(s.cfg.ListenAddr)
-	if err != nil {
-		host = ""
-	}
-	addr := net.JoinHostPort(host, strconv.Itoa(s.stunPort()))
-	ss := stunserver.New(ctx)
-	if err := ss.ListenAndServe(addr); err != nil && ctx.Err() == nil {
-		s.log.Error("veil STUN listener failed", "addr", addr, "err", err)
-	}
-}
-
 // stunPort returns the effective STUN port.
 func (s *Server) stunPort() int {
 	if s.cfg.STUNPort == 0 {
@@ -595,7 +616,7 @@ func (s *Server) DERPMap() (*tailcfg.DERPMap, error) {
 		// presents, so an interception or a swapped relay is refused.
 		CertName: s.certPin,
 	}
-	if !s.cfg.STUN {
+	if !s.cfg.STUN || s.cfg.STUNUnadvertised {
 		node.STUNPort = -1
 	}
 	return &tailcfg.DERPMap{
@@ -617,7 +638,11 @@ func (s *Server) Close() error {
 	s.closeConnections()
 	s.mu.Lock()
 	ln := s.listener
+	cancel := s.cancel
 	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	if ln != nil {
 		return ln.Close()
 	}

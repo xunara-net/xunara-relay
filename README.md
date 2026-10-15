@@ -109,6 +109,10 @@ xunara-relay -hostname relay.example.com -derp-map-out - -derp-map-only
 
 ## 构建与测试
 
+UDP 启用、NAT 映射与真实 Binding Request 验收见 [UDP / STUN](docs/udp-stun.md)。
+公网未验证时可使用 `-stun-unadvertised`，不会广播不可用的 STUN 地址；
+`-check-stun host:port` 可独立检查实际 UDP 通路。
+
 ```bash
 go build ./cmd/xunara-relay
 go test ./...
